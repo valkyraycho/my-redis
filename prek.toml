@@ -20,7 +20,7 @@ repo = "local"
 id = "cargo-fmt"
 name = "cargo fmt"
 language = "system"
-entry = "cargo fmt --check"
+entry = "cargo fmt"
 files = "\\.rs$"
 pass_filenames = false
 

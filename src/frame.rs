@@ -18,6 +18,12 @@ pub enum FrameError {
     Invalid,
 }
 
+impl From<std::io::Error> for FrameError {
+    fn from(_: std::io::Error) -> Self {
+        FrameError::Invalid
+    }
+}
+
 impl Frame {
     pub fn serialize(&self, buf: &mut BytesMut) {
         match self {
@@ -94,8 +100,7 @@ impl Frame {
         }
     }
 
-    #[allow(dead_code)]
-    fn parse(src: &mut Cursor<&[u8]>) -> Result<Frame, FrameError> {
+    pub fn parse(src: &mut Cursor<&[u8]>) -> Result<Frame, FrameError> {
         match get_u8(src)? {
             b'+' => {
                 let line = get_line(src)?;

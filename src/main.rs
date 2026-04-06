@@ -1,10 +1,8 @@
-use tokio::{
-    io::{self, AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-};
+use my_redis::{connection::Connection, frame::FrameError};
+use tokio::net::{TcpListener, TcpStream};
 
 #[tokio::main]
-async fn main() -> io::Result<()> {
+async fn main() -> Result<(), FrameError> {
     let listener = TcpListener::bind("127.0.0.1:6379").await?;
 
     loop {
@@ -13,14 +11,22 @@ async fn main() -> io::Result<()> {
     }
 }
 
-async fn process(mut stream: TcpStream) -> io::Result<()> {
-    let mut buf = vec![0; 1024];
+async fn process(stream: TcpStream) -> Result<(), FrameError> {
+    let mut connection = Connection::new(stream);
     loop {
-        let n = stream.read(&mut buf).await?;
-        if n == 0 {
-            return Ok(());
+        match connection.read_frame().await {
+            Ok(Some(frame)) => {
+                // Echo the frame back for now
+                if let Err(e) = connection.write_frame(&frame).await {
+                    eprintln!("write error: {:?}", e);
+                    return Err(FrameError::Invalid);
+                }
+            }
+            Ok(None) => return Ok(()), // client disconnected
+            Err(e) => {
+                eprintln!("read error: {:?}", e);
+                return Err(FrameError::Invalid);
+            }
         }
-
-        stream.write_all(&buf[..n]).await?
     }
 }
