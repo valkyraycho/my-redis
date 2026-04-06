@@ -1,0 +1,42 @@
+#:schema https://www.schemastore.org/prek.json
+
+
+# Built-in hooks — run offline, zero setup, very fast
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "trailing-whitespace" },
+  { id = "end-of-file-fixer" },
+  { id = "check-toml" },
+  { id = "check-merge-conflict" },
+  { id = "detect-private-key" },
+]
+
+# Rust formatting & linting via local system commands
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "cargo-fmt"
+name = "cargo fmt"
+language = "system"
+entry = "cargo fmt --check"
+files = "\\.rs$"
+pass_filenames = false
+
+[[repos.hooks]]
+id = "cargo-clippy"
+name = "cargo clippy"
+language = "system"
+entry = "cargo clippy -- -D warnings"
+files = "\\.rs$"
+pass_filenames = false
+
+[[repos.hooks]]
+id = "cargo-test"
+name = "cargo test"
+language = "system"
+entry = "cargo test"
+files = "\\.rs$"
+pass_filenames = false
+stages = ["pre-push"]
