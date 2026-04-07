@@ -1,4 +1,4 @@
-use my_redis::{connection::Connection, frame::FrameError};
+use my_redis::{command::Command, connection::Connection, frame::FrameError};
 use tokio::net::{TcpListener, TcpStream};
 
 #[tokio::main]
@@ -16,8 +16,9 @@ async fn process(stream: TcpStream) -> Result<(), FrameError> {
     loop {
         match connection.read_frame().await {
             Ok(Some(frame)) => {
-                // Echo the frame back for now
-                if let Err(e) = connection.write_frame(&frame).await {
+                let command = Command::from_frame(frame)?;
+                let response = command.execute();
+                if let Err(e) = connection.write_frame(&response).await {
                     eprintln!("write error: {:?}", e);
                     return Err(FrameError::Invalid);
                 }
