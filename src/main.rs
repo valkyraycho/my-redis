@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use my_redis::{command::Command, connection::Connection, frame::FrameError, store::Store};
@@ -9,7 +10,17 @@ use tokio::net::{TcpListener, TcpStream};
 #[tokio::main]
 async fn main() -> Result<(), FrameError> {
     let listener = TcpListener::bind("127.0.0.1:6379").await?;
-    let store = Arc::new(Mutex::new(HashMap::new()));
+    let store: Store = Arc::new(Mutex::new(HashMap::new()));
+    let purge_store = store.clone();
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            let mut purge_store = purge_store.lock().unwrap();
+            purge_store.retain(|_, entry| !entry.is_expired());
+        }
+    });
 
     loop {
         let (stream, _) = listener.accept().await?;

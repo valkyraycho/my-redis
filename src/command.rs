@@ -1,11 +1,23 @@
+use std::time::Duration;
+
+use tokio::time::Instant;
+
 use crate::frame::{Frame, FrameError};
-use crate::store::Store;
+use crate::store::{Entry, Store};
 
 pub enum Command {
     Ping,
-    Echo(String),
-    Get(String),
-    Set(String, String),
+    Echo {
+        message: String,
+    },
+    Get {
+        key: String,
+    },
+    Set {
+        key: String,
+        value: String,
+        expiry: Option<Duration>,
+    },
 }
 
 impl Command {
@@ -23,29 +35,53 @@ impl Command {
         match command.to_ascii_uppercase().as_str() {
             "PING" => Ok(Command::Ping),
             "ECHO" => {
-                let arg = match frames.next() {
+                let message = match frames.next() {
                     Some(Frame::Bulk(s)) => s,
                     _ => return Err(FrameError::Invalid),
                 };
-                Ok(Command::Echo(arg))
+                Ok(Command::Echo { message })
             }
             "GET" => {
                 let key = match frames.next() {
                     Some(Frame::Bulk(s)) => s,
                     _ => return Err(FrameError::Invalid),
                 };
-                Ok(Command::Get(key))
+                Ok(Command::Get { key })
             }
             "SET" => {
                 let key = match frames.next() {
                     Some(Frame::Bulk(s)) => s,
                     _ => return Err(FrameError::Invalid),
                 };
-                let val = match frames.next() {
+                let value = match frames.next() {
                     Some(Frame::Bulk(s)) => s,
                     _ => return Err(FrameError::Invalid),
                 };
-                Ok(Command::Set(key, val))
+                match (frames.next(), frames.next()) {
+                    (None, _) => Ok(Command::Set {
+                        key,
+                        value,
+                        expiry: None,
+                    }),
+                    (_, None) => Err(FrameError::Invalid),
+                    (Some(Frame::Bulk(scale)), Some(Frame::Bulk(duration))) => {
+                        let duration = duration.parse::<u64>().map_err(|_| FrameError::Invalid)?;
+                        match scale.to_ascii_uppercase().as_str() {
+                            "EX" => Ok(Command::Set {
+                                key,
+                                value,
+                                expiry: Some(Duration::from_secs(duration)),
+                            }),
+                            "PX" => Ok(Command::Set {
+                                key,
+                                value,
+                                expiry: Some(Duration::from_millis(duration)),
+                            }),
+                            _ => Err(FrameError::Invalid),
+                        }
+                    }
+                    _ => Err(FrameError::Invalid),
+                }
             }
             _ => Err(FrameError::Invalid),
         }
@@ -54,17 +90,27 @@ impl Command {
     pub fn execute(self, db: &Store) -> Frame {
         match self {
             Command::Ping => Frame::Simple("PONG".to_string()),
-            Command::Echo(s) => Frame::Bulk(s),
-            Command::Get(key) => {
-                let db = db.lock().unwrap();
+            Command::Echo { message } => Frame::Bulk(message),
+            Command::Get { key } => {
+                let mut db = db.lock().unwrap();
                 match db.get(&key) {
+                    Some(entry) if entry.is_expired() => {
+                        db.remove(&key);
+                        Frame::Null
+                    }
+                    Some(entry) => Frame::Bulk(entry.value.clone()),
                     None => Frame::Null,
-                    Some(s) => Frame::Bulk(s.to_owned()),
                 }
             }
-            Command::Set(key, val) => {
+            Command::Set { key, value, expiry } => {
                 let mut db = db.lock().unwrap();
-                db.insert(key, val);
+                db.insert(
+                    key,
+                    Entry {
+                        value,
+                        expires_at: expiry.map(|duration| Instant::now() + duration),
+                    },
+                );
                 Frame::Simple("OK".to_string())
             }
         }
@@ -100,7 +146,7 @@ mod tests {
     #[test]
     fn parse_echo() {
         let cmd = Command::from_frame(cmd_array(&["ECHO", "hello"])).unwrap();
-        assert!(matches!(cmd, Command::Echo(s) if s == "hello"));
+        assert!(matches!(cmd, Command::Echo { message } if message == "hello"));
     }
 
     #[test]
@@ -141,47 +187,144 @@ mod tests {
     #[test]
     fn execute_echo() {
         let store = new_store();
-        let response = Command::Echo("hello".to_string()).execute(&store);
+        let response = Command::Echo {
+            message: "hello".to_string(),
+        }
+        .execute(&store);
         assert!(matches!(response, Frame::Bulk(s) if s == "hello"));
     }
 
     #[test]
     fn execute_set_and_get() {
         let store = new_store();
-        let response = Command::Set("key".to_string(), "value".to_string()).execute(&store);
+        let response = Command::Set {
+            key: "key".to_string(),
+            value: "value".to_string(),
+            expiry: None,
+        }
+        .execute(&store);
         assert!(matches!(response, Frame::Simple(s) if s == "OK"));
 
-        let response = Command::Get("key".to_string()).execute(&store);
+        let response = Command::Get {
+            key: "key".to_string(),
+        }
+        .execute(&store);
         assert!(matches!(response, Frame::Bulk(s) if s == "value"));
     }
 
     #[test]
     fn execute_get_missing_key() {
         let store = new_store();
-        let response = Command::Get("nokey".to_string()).execute(&store);
+        let response = Command::Get {
+            key: "nokey".to_string(),
+        }
+        .execute(&store);
         assert!(matches!(response, Frame::Null));
     }
 
     #[test]
     fn execute_set_overwrites() {
         let store = new_store();
-        Command::Set("key".to_string(), "first".to_string()).execute(&store);
-        Command::Set("key".to_string(), "second".to_string()).execute(&store);
+        Command::Set {
+            key: "key".to_string(),
+            value: "first".to_string(),
+            expiry: None,
+        }
+        .execute(&store);
+        Command::Set {
+            key: "key".to_string(),
+            value: "second".to_string(),
+            expiry: None,
+        }
+        .execute(&store);
 
-        let response = Command::Get("key".to_string()).execute(&store);
+        let response = Command::Get {
+            key: "key".to_string(),
+        }
+        .execute(&store);
         assert!(matches!(response, Frame::Bulk(s) if s == "second"));
+    }
+
+    #[test]
+    fn execute_get_expired_key() {
+        let store = new_store();
+        // Set with 0-second expiry — already expired
+        Command::Set {
+            key: "key".to_string(),
+            value: "value".to_string(),
+            expiry: Some(Duration::from_secs(0)),
+        }
+        .execute(&store);
+
+        // Small sleep to ensure expiry
+        std::thread::sleep(Duration::from_millis(10));
+
+        let response = Command::Get {
+            key: "key".to_string(),
+        }
+        .execute(&store);
+        assert!(matches!(response, Frame::Null));
+    }
+
+    #[test]
+    fn execute_get_unexpired_key() {
+        let store = new_store();
+        Command::Set {
+            key: "key".to_string(),
+            value: "value".to_string(),
+            expiry: Some(Duration::from_secs(60)),
+        }
+        .execute(&store);
+
+        let response = Command::Get {
+            key: "key".to_string(),
+        }
+        .execute(&store);
+        assert!(matches!(response, Frame::Bulk(s) if s == "value"));
     }
 
     #[test]
     fn parse_get() {
         let cmd = Command::from_frame(cmd_array(&["GET", "mykey"])).unwrap();
-        assert!(matches!(cmd, Command::Get(k) if k == "mykey"));
+        assert!(matches!(cmd, Command::Get { key } if key == "mykey"));
     }
 
     #[test]
     fn parse_set() {
         let cmd = Command::from_frame(cmd_array(&["SET", "mykey", "myval"])).unwrap();
-        assert!(matches!(cmd, Command::Set(k, v) if k == "mykey" && v == "myval"));
+        assert!(
+            matches!(cmd, Command::Set { key, value, expiry } if key == "mykey" && value == "myval" && expiry.is_none())
+        );
+    }
+
+    #[test]
+    fn parse_set_with_ex() {
+        let cmd = Command::from_frame(cmd_array(&["SET", "k", "v", "EX", "10"])).unwrap();
+        assert!(
+            matches!(cmd, Command::Set { expiry: Some(d), .. } if d == Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn parse_set_with_px() {
+        let cmd = Command::from_frame(cmd_array(&["SET", "k", "v", "PX", "500"])).unwrap();
+        assert!(
+            matches!(cmd, Command::Set { expiry: Some(d), .. } if d == Duration::from_millis(500))
+        );
+    }
+
+    #[test]
+    fn parse_set_with_ex_lowercase() {
+        let cmd = Command::from_frame(cmd_array(&["SET", "k", "v", "ex", "10"])).unwrap();
+        assert!(
+            matches!(cmd, Command::Set { expiry: Some(d), .. } if d == Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn parse_set_with_invalid_expiry() {
+        let result = Command::from_frame(cmd_array(&["SET", "k", "v", "EX", "notanumber"]));
+        assert!(result.is_err());
     }
 
     #[test]
