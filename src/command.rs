@@ -36,6 +36,13 @@ pub enum Command {
     Mset {
         pairs: Vec<(String, String)>,
     },
+    Subscribe {
+        channels: Vec<String>,
+    },
+    Publish {
+        channel: String,
+        message: String,
+    },
 }
 
 impl Command {
@@ -155,6 +162,29 @@ impl Command {
                 }
                 Ok(Command::Mset { pairs })
             }
+            "SUBSCRIBE" => {
+                let channels: Result<Vec<String>, FrameError> = frames
+                    .map(|frame| match frame {
+                        Frame::Bulk(s) => Ok(s),
+                        _ => Err(FrameError::Invalid),
+                    })
+                    .collect();
+
+                Ok(Command::Subscribe {
+                    channels: channels?,
+                })
+            }
+            "PUBLISH" => {
+                let channel = match frames.next() {
+                    Some(Frame::Bulk(s)) => s,
+                    _ => return Err(FrameError::Invalid),
+                };
+                let message = match frames.next() {
+                    Some(Frame::Bulk(s)) => s,
+                    _ => return Err(FrameError::Invalid),
+                };
+                Ok(Command::Publish { channel, message })
+            }
             _ => Err(FrameError::Invalid),
         }
     }
@@ -250,6 +280,7 @@ impl Command {
                 }
                 Frame::Simple("OK".to_string())
             }
+            _ => Frame::Null,
         }
     }
     fn incr_by(db: &Store, key: String, delta: i64) -> Result<i64, FrameError> {
@@ -760,6 +791,36 @@ mod tests {
         }
         .execute(&store);
         assert!(matches!(response, Frame::Bulk(s) if s == "2"));
+    }
+
+    // --- SUBSCRIBE / PUBLISH parse tests ---
+
+    #[test]
+    fn parse_subscribe_single() {
+        let cmd = Command::from_frame(cmd_array(&["SUBSCRIBE", "news"])).unwrap();
+        assert!(matches!(cmd, Command::Subscribe { channels } if channels == vec!["news"]));
+    }
+
+    #[test]
+    fn parse_subscribe_multiple() {
+        let cmd = Command::from_frame(cmd_array(&["SUBSCRIBE", "news", "alerts"])).unwrap();
+        assert!(
+            matches!(cmd, Command::Subscribe { channels } if channels == vec!["news", "alerts"])
+        );
+    }
+
+    #[test]
+    fn parse_publish() {
+        let cmd = Command::from_frame(cmd_array(&["PUBLISH", "news", "hello"])).unwrap();
+        assert!(
+            matches!(cmd, Command::Publish { channel, message } if channel == "news" && message == "hello")
+        );
+    }
+
+    #[test]
+    fn parse_publish_missing_message() {
+        let result = Command::from_frame(cmd_array(&["PUBLISH", "news"]));
+        assert!(result.is_err());
     }
 
     // --- helpers ---

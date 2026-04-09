@@ -8,3 +8,4 @@ tokio = { version = "1", features = ["full"] }
 bytes = "1"
 itoa = "1.0.18"
 atoi = "2.0.0"
+tokio-stream = { version = "0.1", features = ["sync"] }
