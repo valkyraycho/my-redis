@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -9,7 +10,7 @@ use my_redis::{
     command::Command,
     connection::Connection,
     frame::{Frame, FrameError},
-    store::Store,
+    store::{Store, load, save},
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -21,8 +22,12 @@ use tokio_stream::{StreamExt, StreamMap};
 #[tokio::main]
 async fn main() -> Result<(), FrameError> {
     let listener = TcpListener::bind("127.0.0.1:6379").await?;
-    let store: Store = Arc::new(Mutex::new(HashMap::new()));
+    let store: Store = match load(Path::new("dump.rdb")) {
+        Ok(store) => store,
+        Err(_) => Arc::new(Mutex::new(HashMap::new())),
+    };
     let purge_store = store.clone();
+    let save_store = store.clone();
     let channels: Channels = Arc::new(Mutex::new(HashMap::new()));
 
     tokio::spawn(async move {
@@ -31,6 +36,16 @@ async fn main() -> Result<(), FrameError> {
             interval.tick().await;
             let mut purge_store = purge_store.lock().unwrap();
             purge_store.retain(|_, entry| !entry.is_expired());
+        }
+    });
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            if let Err(e) = save(&save_store, Path::new("dump.rdb")) {
+                eprintln!("save error: {:?}", e)
+            }
         }
     });
 
