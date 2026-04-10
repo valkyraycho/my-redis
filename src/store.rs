@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     path::Path,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use bincode;
@@ -27,29 +27,50 @@ impl Entry {
 #[derive(Serialize, Deserialize)]
 pub struct SavedEntry {
     value: String,
-    ttl_secs: Option<f64>,
+    expires_at_unix: Option<f64>,
 }
 
 impl From<&Entry> for SavedEntry {
     fn from(entry: &Entry) -> Self {
-        let remaining = entry
-            .expires_at
-            .and_then(|exp| exp.checked_duration_since(Instant::now()));
+        let now_instant = Instant::now();
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+
+        let expires_at_unix = entry.expires_at.map(|exp| {
+            let remaining = exp.duration_since(now_instant).as_secs_f64();
+            now_unix + remaining
+        });
 
         Self {
             value: entry.value.clone(),
-            ttl_secs: remaining.map(|d| d.as_secs_f64()),
+            expires_at_unix,
         }
     }
 }
 
 impl From<SavedEntry> for Entry {
     fn from(entry: SavedEntry) -> Self {
+        let now_instant = Instant::now();
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+
+        let expires_at = entry.expires_at_unix.map(|exp_unix| {
+            let remaining = exp_unix - now_unix;
+            if remaining <= 0.0 {
+                // Already expired — set to a past Instant so is_expired() returns true
+                now_instant - Duration::from_secs(1)
+            } else {
+                now_instant + Duration::from_secs_f64(remaining)
+            }
+        });
+
         Self {
             value: entry.value,
-            expires_at: entry
-                .ttl_secs
-                .map(|secs| Instant::now() + Duration::from_secs_f64(secs)),
+            expires_at,
         }
     }
 }
